@@ -1,0 +1,248 @@
+# important points:
+# use <robot_position> to get current position of robot in <x,y,theta> format.
+# use <robot_omega> to get current values for the wheels in <w1,w2,w3> format.
+
+# import numpy as np
+from initialization import *
+import math
+
+current_state = 0
+next_state = 0
+target = 1.3, 6.15  # todo
+distance_range = 100, 200
+
+leaving_position = None  # todo
+closest_point_distance = 0
+closest_point = 0
+insurance_check = 0
+fb_state = 0
+fb_nxstate = 0
+
+starting_degree=0
+wall_dist =0
+
+
+# alpha is the angle between head of robot and target
+# vectors
+rotate_right = [1, 1, 1]
+rotate_left = [-1, -1, -1]
+move_forward = [0, 1, -1]
+mov = [1.99, 1.99, -2.8284271247]
+
+
+def set_motor_speed(move_vector, gain=1.0):
+    speeds = move_vector[0] * gain, move_vector[1] * gain, move_vector[2] * gain
+    update_motor_speed(speeds)
+
+
+def is_arrived(sensor_values, target):
+    arrive_threshold = 0.001
+    distance, _ = get_distance(sensor_values, target)
+    return True if distance < arrive_threshold else False
+
+
+def current_position(sensor_values):
+    return sensor_values[0]
+
+
+def get_distance(sensor_values, target):
+    x_threshold = 0.001
+    source = current_position(sensor_values)
+    # print(source,target)
+    x = (target[0] - source[0])
+    y = (target[1] - source[1])
+    alpha = math.atan2(y, x) * 180 / math.pi
+
+    return (x ** 2 + y ** 2) ** 0.5, (x, y, alpha)
+
+
+def complete_loop(sensor_values, leaving_position):
+    return is_arrived(sensor_values, leaving_position)
+
+
+def get_bearing_in_degrees(north):
+    rad = math.atan2(north[0], north[1])
+    bearing = (rad) / math.pi * 180.0
+    if bearing < 0.0:
+        bearing = bearing + 360
+    bearing -= 180
+
+    return bearing
+
+
+def go_to_target(sensor_values, target, move_speed=10):
+    alpha_threshold = 0.1
+    alpha_precise_threshold = 30
+    alpha_precise2_threshold = 5
+
+    _, (x, y, alpha) = get_distance(sensor_values, target)
+    head_degree = get_bearing_in_degrees(sensor_values[1])
+    differential_degree = alpha - head_degree
+    # print('alpha is: ', alpha, 'head_degree ', head_degree, 'dd ', differential_degree, 'x ', x, 'y ', y)
+
+    if abs(differential_degree) > alpha_precise_threshold:
+        if differential_degree < 0:
+            set_motor_speed(rotate_right, 10)
+        else:
+            set_motor_speed(rotate_left, 10)
+    elif abs(differential_degree) > alpha_precise2_threshold:
+        if differential_degree < 0:
+            set_motor_speed(rotate_right, 2)
+        else:
+            set_motor_speed(rotate_left, 2)
+    elif abs(differential_degree) > alpha_threshold:
+        # print('rotate ', differential_degree)
+
+        if differential_degree < 0:
+            set_motor_speed(rotate_right, 0.5)
+        else:
+            set_motor_speed(rotate_left)
+    else:
+        # print('move', differential_degree)
+        set_motor_speed(move_forward, move_speed)
+
+
+def check_surroundings(sensor_values):
+    sonar_threshold = 900
+    ir_threshold = 900
+    _, compass_val, sonar_value, _, ir_value = sensor_values
+    obstacles = [10000, 10000, 10000]
+    if sonar_value[1] < sonar_threshold or ir_value[0] < ir_threshold or ir_value[3] < ir_threshold:
+        obstacles[0] = sonar_value[1] if (sonar_value[1] < sonar_threshold) else 0
+        # print('head', sonar_value[1], ir_value[0], ir_value[3])
+    if sonar_value[0] < sonar_threshold or ir_value[2] < ir_threshold or ir_value[5] < ir_threshold:
+        obstacles[1] = sonar_value[2] if sonar_value[0] < sonar_threshold else 0
+
+        # print('right', sonar_value[0], ir_value[2], ir_value[5])
+
+    if sonar_value[2] < sonar_threshold or ir_value[1] < ir_threshold or ir_value[4] < ir_threshold:
+        obstacles[2] = sonar_value[2] if sonar_value[2] < sonar_threshold else 0
+        # print('left', sonar_value[2], ir_value[1], ir_value[4])
+
+    return obstacles
+
+
+def check_obstacle(obstacle_distances,distance_range):
+    if (obstacle_distances[0] > distance_range[0] and obstacle_distances[0] < distance_range[1]) or (
+            obstacle_distances[1] > distance_range[0] and obstacle_distances[1] < distance_range[1]) or (
+            obstacle_distances[2] > distance_range[0] and obstacle_distances[2] < distance_range[1]):
+        return False
+    else:
+        return True
+
+
+def follow_boundary(sensor_values, starting_degree, fb_nxstate, wall_dist,distance_range):
+    print(fb_nxstate)
+    # rotate left
+    fb_state = fb_nxstate
+    if fb_state == 0:
+        obstacle_distances = check_surroundings(sensor_values)
+        set_motor_speed(rotate_right, 2)
+        print('dist',obstacle_distances)
+        if abs(obstacle_distances[0] - obstacle_distances[2]) < 5 and obstacle_distances[0] + obstacle_distances[2] <1600:
+            fb_nxstate = 1
+            print(obstacle_distances[0] , obstacle_distances[2],abs(obstacle_distances[0] - obstacle_distances[2]) )
+            starting_degree = get_bearing_in_degrees(sensor_values[1])
+        elif abs(obstacle_distances[0] - obstacle_distances[2]) < 40:
+            set_motor_speed(rotate_right, 0.5)
+    # rotate right 30 degree
+    elif fb_state == 1:
+        set_motor_speed(rotate_right, 1)
+        head_degree = get_bearing_in_degrees(sensor_values[1])
+        difrential_degree = starting_degree - head_degree if (
+                starting_degree > -150) else starting_degree + 360 - head_degree
+        if abs(difrential_degree - 30) > 30:
+            fb_nxstate = 2
+            obstacle_distances = check_surroundings(sensor_values)
+            wall_dist = obstacle_distances[2]
+    # move rightward
+    elif fb_state == 2:
+        set_motor_speed(move_forward)
+        obstacle_distances = check_surroundings(sensor_values)
+
+        if obstacle_distances[0] >distance_range[0] and obstacle_distances[0] < distance_range[1]:
+            fb_nxstate = 3
+        if obstacle_distances[2] > wall_dist + 30 or obstacle_distances[2] < wall_dist - 30:
+            fb_nxstate = 0
+    # turn left
+    elif fb_state == 2:
+        print('tttttuuuuuuurn leffffft')
+        pass
+
+    return fb_nxstate, starting_degree, wall_dist
+
+
+if __name__ == "__main__":
+
+    TIME_STEP = 32
+    robot = init_robot(time_step=TIME_STEP)
+    init_robot_state(in_pos=[0, 0, 0], in_omega=[0, 0, 0])
+    update_motor_speed(input_omega=[5, 5, 5])
+
+    # goal_postition = np.array([0,0])
+
+    # DEFINE STATES HERE!
+
+    while robot.step(TIME_STEP) != -1:
+        current_state = next_state
+        sensor_values = read_sensors_values()
+        # starting state ( onto the target)
+        if current_state == 0:
+            go_to_target(sensor_values, target)
+            arrived = is_arrived(sensor_values, target)
+            if arrived:
+                next_state = -1
+            obstacle_distances = check_surroundings(sensor_values)
+            no_obs = check_obstacle(obstacle_distances,distance_range)
+            if no_obs:
+                next_state = 0
+            else:
+                leaving_position = current_position(sensor_values)
+                next_state = 4
+        # obstacle insurance
+        if current_state == 4:
+            go_to_target(sensor_values, target, 0.5)
+            arrived = is_arrived(sensor_values, target)
+            if arrived:
+                next_state = -1
+            obstacle_distances = check_surroundings(sensor_values)
+            no_obs = check_obstacle(obstacle_distances,distance_range)
+            if no_obs:
+                next_state = 0
+                insurance_check = 0
+            else:
+                if insurance_check < 5:
+                    next_state = 4
+                    insurance_check += 1
+                    print('insurance', insurance_check)
+                else:
+                    leaving_position = current_position(sensor_values)
+                    insurance_check = 0
+                    next_state = 1
+        # follow boundary state
+        elif current_state == 1:
+            # print('state1', current_state, ' -', check_surroundings(sensor_values))
+            fb_nxstate, starting_degree, wall_dist = follow_boundary(sensor_values,starting_degree,fb_nxstate,wall_dist,distance_range)
+            distance, _ = get_distance(sensor_values, target)
+            if distance < closest_point_distance:
+                closest_point_distance = distance
+                closest_point = current_position(sensor_values)
+            if complete_loop(sensor_values, leaving_position):
+                next_state = 2
+                print('closest point', closest_point)
+                closest_point_distance = 10000000000
+                # closest_point = None
+            else:
+                next_state = 1
+        # follow best point state
+        elif current_state == 2:
+            print('STATE 2')
+            follow_boundary(sensor_values)
+            arrived = is_arrived(sensor_values, closest_point)
+            if arrived:
+                next_state = 0
+            else:
+                next_state = 2
+        # arrive state
+        elif current_state == -1:
+            next_state = -1
